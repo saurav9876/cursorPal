@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.cursorpal_config
+~/.cursorpal_config
+*.egg-info/
+.env
