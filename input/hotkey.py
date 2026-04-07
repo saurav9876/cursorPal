@@ -8,20 +8,33 @@ try:
 except ImportError:
     PYNPUT_AVAILABLE = False
 
+# All variants of the Option/Alt key pynput may report
+_ALT_KEYS = (
+    {keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r}
+    if PYNPUT_AVAILABLE else set()
+)
+_CMD_KEYS = (
+    {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
+    if PYNPUT_AVAILABLE else set()
+)
+_SHIFT_KEYS = (
+    {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
+    if PYNPUT_AVAILABLE else set()
+)
+
+
+def _any(keys: set, pressed: set) -> bool:
+    return bool(keys & pressed)
+
 
 class HotkeyListener:
     """
     Listens globally for two hotkeys:
       - Cmd+Shift+Space  → toggle text overlay
-      - Option+Space     → push-to-talk (on_voice_press / on_voice_release)
+      - Option+Space     → push-to-talk voice input
 
     All callbacks must be thread-safe (use root.after() inside them).
     """
-
-    # Cmd+Shift+Space
-    TOGGLE_COMBO = {keyboard.Key.cmd, keyboard.Key.shift, keyboard.Key.space} if PYNPUT_AVAILABLE else set()
-    # Option+Space
-    VOICE_KEYS = {keyboard.Key.alt, keyboard.Key.space} if PYNPUT_AVAILABLE else set()
 
     def __init__(
         self,
@@ -56,15 +69,21 @@ class HotkeyListener:
         self._pressed.add(key)
 
         # Cmd+Shift+Space → toggle overlay
-        if self.TOGGLE_COMBO.issubset(self._pressed) and not self._toggle_fired:
+        if (
+            _any(_CMD_KEYS, self._pressed)
+            and _any(_SHIFT_KEYS, self._pressed)
+            and keyboard.Key.space in self._pressed
+            and not self._toggle_fired
+        ):
             self._toggle_fired = True
             self._on_toggle()
 
-        # Option+Space → start voice (only if Cmd not held, to avoid overlap)
+        # Option+Space → start voice (Cmd/Shift must NOT be held)
         if (
-            self.VOICE_KEYS.issubset(self._pressed)
-            and keyboard.Key.cmd not in self._pressed
-            and keyboard.Key.shift not in self._pressed
+            _any(_ALT_KEYS, self._pressed)
+            and keyboard.Key.space in self._pressed
+            and not _any(_CMD_KEYS, self._pressed)
+            and not _any(_SHIFT_KEYS, self._pressed)
             and not self._voice_active
         ):
             self._voice_active = True
@@ -73,13 +92,17 @@ class HotkeyListener:
     def _on_release(self, key) -> None:
         self._pressed.discard(key)
 
-        # Reset toggle fire guard when combo breaks
-        if not self.TOGGLE_COMBO.issubset(self._pressed):
+        # Reset toggle guard
+        if not (
+            _any(_CMD_KEYS, self._pressed)
+            and _any(_SHIFT_KEYS, self._pressed)
+            and keyboard.Key.space in self._pressed
+        ):
             self._toggle_fired = False
 
         # Option or Space released → stop voice
         if self._voice_active and (
-            key in (keyboard.Key.alt, keyboard.Key.space)
+            key in _ALT_KEYS or key == keyboard.Key.space
         ):
             self._voice_active = False
             self._on_voice_release()
