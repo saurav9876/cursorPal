@@ -116,7 +116,7 @@ class AgentLoop:
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "high"},
+                        "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "low"},
                     },
                     {"type": "text", "text": user_message},
                 ],
@@ -124,6 +124,9 @@ class AgentLoop:
         ]
 
         while not self._cancel.is_set():
+            # Drop old screenshots from history to stay within token limits
+            self._trim_screenshots(messages)
+
             # Stream the response
             text, tool_calls = self._stream_turn(messages)
 
@@ -161,7 +164,7 @@ class AgentLoop:
                             "type": "image_url",
                             "image_url": {
                                 "url": f"data:image/png;base64,{img['data']}",
-                                "detail": "high",
+                                "detail": "low",
                             },
                         }
                     ]
@@ -173,6 +176,22 @@ class AgentLoop:
                     "tool_call_id": tc["id"],
                     "content": content if isinstance(content, str) else json.dumps(content),
                 })
+
+    def _trim_screenshots(self, messages: list) -> None:
+        """Replace all but the last screenshot with a text placeholder to save tokens."""
+        image_positions = []
+        for i, msg in enumerate(messages):
+            content = msg.get("content")
+            if isinstance(content, list):
+                for j, block in enumerate(content):
+                    if isinstance(block, dict) and block.get("type") == "image_url":
+                        image_positions.append((i, j))
+            elif isinstance(content, str) and content.startswith("[screenshot]"):
+                pass  # already trimmed
+
+        # Keep only the last screenshot, replace the rest
+        for i, j in image_positions[:-1]:
+            messages[i]["content"][j] = {"type": "text", "text": "[screenshot]"}
 
     def _stream_turn(self, messages: list) -> tuple[str, list]:
         """Stream one API turn. Returns (full_text, tool_calls_list)."""
