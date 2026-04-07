@@ -3,31 +3,93 @@ import threading
 import json
 from typing import Callable
 
-import anthropic
+from openai import OpenAI
 
 from .screenshot import ScreenshotCapture
 from .tools import ToolExecutor
 import config as cfg
 
+# Tool definition we hand to GPT-4o — same interface as before
+COMPUTER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "computer",
+        "description": (
+            "Control the macOS computer. Use this to take screenshots, click, type, "
+            "press keys, scroll, and move the mouse."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "screenshot",
+                        "left_click",
+                        "right_click",
+                        "double_click",
+                        "mouse_move",
+                        "left_click_drag",
+                        "type",
+                        "key",
+                        "scroll",
+                    ],
+                    "description": "The action to perform.",
+                },
+                "coordinate": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "[x, y] screen coordinate for click/move/scroll actions.",
+                },
+                "start_coordinate": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "[x, y] start coordinate for drag.",
+                },
+                "end_coordinate": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "[x, y] end coordinate for drag.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Text to type (for 'type' action).",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Key combo to press, e.g. 'cmd+t', 'Return', 'escape'.",
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["up", "down", "left", "right"],
+                    "description": "Scroll direction.",
+                },
+                "amount": {
+                    "type": "number",
+                    "description": "Scroll amount (lines).",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
 
 class AgentLoop:
-    """
-    Runs the Claude computer-use agentic loop in a background thread.
-    Streams narration to the UI and executes computer actions.
-    """
+    """Runs the OpenAI GPT-4o computer-use agentic loop in a background thread."""
 
     def __init__(
         self,
         api_key: str,
         screenshot_capture: ScreenshotCapture,
         tool_executor: ToolExecutor,
-        on_text_chunk: Callable[[str, str], None],  # (text, tag)
-        on_action: Callable[[str, str], None],       # (action_type, description)
+        on_text_chunk: Callable[[str, str], None],
+        on_action: Callable[[str, str], None],
         on_done: Callable[[], None],
         on_error: Callable[[str], None],
         cancel_event: threading.Event,
     ):
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = OpenAI(api_key=api_key)
         self._sc = screenshot_capture
         self._executor = tool_executor
         self._on_text = on_text_chunk
@@ -45,115 +107,119 @@ class AgentLoop:
             self._on_done()
 
     def _run(self, user_message: str) -> None:
-        # Initial screenshot
         b64, w, h = self._sc.capture()
 
-        tool_def = self._executor.build_tool_definition(w, h)
-
-        messages = [{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": b64,
+        messages = [
+            {"role": "system", "content": cfg.SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "high"},
                     },
-                },
-                {
-                    "type": "text",
-                    "text": user_message,
-                },
-            ],
-        }]
+                    {"type": "text", "text": user_message},
+                ],
+            },
+        ]
 
         while not self._cancel.is_set():
-            content_blocks, stop_reason = self._stream_turn(messages, tool_def)
+            # Stream the response
+            text, tool_calls = self._stream_turn(messages)
 
-            if stop_reason == "end_turn" or not self._has_tool_use(content_blocks):
+            if text:
+                messages.append({"role": "assistant", "content": text})
+
+            if not tool_calls:
                 break
 
-            # Build assistant turn from collected blocks
-            messages.append({"role": "assistant", "content": content_blocks})
+            # Build assistant message with tool calls
+            messages.append({
+                "role": "assistant",
+                "content": text or "",
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {"name": "computer", "arguments": json.dumps(tc["input"])},
+                    }
+                    for tc in tool_calls
+                ],
+            })
 
-            # Execute tool uses, collect results
-            tool_results = []
-            for block in content_blocks:
+            # Execute tools and collect results
+            for tc in tool_calls:
                 if self._cancel.is_set():
                     break
-                if block.get("type") == "tool_use":
-                    result_content = self._executor.execute(block)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block["id"],
-                        "content": result_content,
-                    })
+                result_content = self._executor.execute({"input": tc["input"]})
 
-            messages.append({"role": "user", "content": tool_results})
-
-    def _stream_turn(self, messages: list, tool_def: dict) -> tuple[list, str]:
-        """Stream one API turn. Returns (content_blocks, stop_reason)."""
-        content_blocks = []
-        stop_reason = "end_turn"
-
-        current_block: dict | None = None
-        current_json_buf = ""
-
-        with self._client.beta.messages.stream(
-            model=cfg.ANTHROPIC_MODEL,
-            max_tokens=cfg.MAX_TOKENS,
-            system=cfg.SYSTEM_PROMPT,
-            tools=[tool_def],
-            messages=messages,
-            betas=[cfg.COMPUTER_USE_BETA],
-        ) as stream:
-            for event in stream:
-                if self._cancel.is_set():
-                    break
-
-                etype = event.type
-
-                if etype == "content_block_start":
-                    cb = event.content_block
-                    if cb.type == "text":
-                        current_block = {"type": "text", "text": ""}
-                        current_json_buf = ""
-                    elif cb.type == "tool_use":
-                        current_block = {
-                            "type": "tool_use",
-                            "id": cb.id,
-                            "name": cb.name,
-                            "input": {},
+                # result_content is a list with an image dict
+                if result_content and result_content[0].get("type") == "image":
+                    img = result_content[0]["source"]
+                    content = [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img['data']}",
+                                "detail": "high",
+                            },
                         }
-                        current_json_buf = ""
+                    ]
+                else:
+                    content = result_content[0].get("text", "done") if result_content else "done"
 
-                elif etype == "content_block_delta":
-                    delta = event.delta
-                    if current_block is None:
-                        continue
-                    if delta.type == "text_delta":
-                        current_block["text"] += delta.text
-                        self._on_text(delta.text, "narration")
-                    elif delta.type == "input_json_delta":
-                        current_json_buf += delta.partial_json
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": content if isinstance(content, str) else json.dumps(content),
+                })
 
-                elif etype == "content_block_stop":
-                    if current_block is not None:
-                        if current_block["type"] == "tool_use" and current_json_buf:
-                            try:
-                                current_block["input"] = json.loads(current_json_buf)
-                            except json.JSONDecodeError:
-                                current_block["input"] = {}
-                        content_blocks.append(current_block)
-                        current_block = None
-                        current_json_buf = ""
+    def _stream_turn(self, messages: list) -> tuple[str, list]:
+        """Stream one API turn. Returns (full_text, tool_calls_list)."""
+        full_text = ""
+        tool_calls: dict[int, dict] = {}  # index → {id, input_buf}
 
-                elif etype == "message_delta":
-                    if hasattr(event, "delta") and hasattr(event.delta, "stop_reason"):
-                        stop_reason = event.delta.stop_reason or "end_turn"
+        stream = self._client.chat.completions.create(
+            model=cfg.OPENAI_MODEL,
+            max_tokens=cfg.MAX_TOKENS,
+            messages=messages,
+            tools=[COMPUTER_TOOL],
+            tool_choice="auto",
+            stream=True,
+        )
 
-        return content_blocks, stop_reason
+        for chunk in stream:
+            if self._cancel.is_set():
+                break
 
-    def _has_tool_use(self, blocks: list) -> bool:
-        return any(b.get("type") == "tool_use" for b in blocks)
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta is None:
+                continue
+
+            # Stream text
+            if delta.content:
+                full_text += delta.content
+                self._on_text(delta.content, "narration")
+
+            # Accumulate tool calls
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_calls:
+                        tool_calls[idx] = {"id": tc_delta.id or "", "input_buf": ""}
+                    if tc_delta.id:
+                        tool_calls[idx]["id"] = tc_delta.id
+                    if tc_delta.function and tc_delta.function.arguments:
+                        tool_calls[idx]["input_buf"] += tc_delta.function.arguments
+
+        # Parse tool call arguments
+        result = []
+        for idx in sorted(tool_calls):
+            tc = tool_calls[idx]
+            try:
+                inp = json.loads(tc["input_buf"])
+            except json.JSONDecodeError:
+                inp = {}
+            result.append({"id": tc["id"], "input": inp})
+
+        return full_text, result

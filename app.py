@@ -99,7 +99,7 @@ class App:
         self.overlay.show_action_badge("screenshot", "Starting…")
 
         loop = AgentLoop(
-            api_key=cfg.ANTHROPIC_API_KEY,
+            api_key=cfg.OPENAI_API_KEY,
             screenshot_capture=self._sc,
             tool_executor=self._executor,
             on_text_chunk=lambda t, tag: self.overlay.append_narration(t, tag),

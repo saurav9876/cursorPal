@@ -11,7 +11,7 @@ import tkinter as tk
 
 def check_deps():
     missing = []
-    for pkg in ["anthropic", "PIL", "pynput"]:
+    for pkg in ["openai", "PIL", "pynput"]:
         try:
             __import__(pkg)
         except ImportError:
@@ -25,8 +25,8 @@ def check_deps():
 def get_api_key() -> str:
     """Return API key from config, or prompt user via a tk modal."""
     import config as cfg
-    if cfg.ANTHROPIC_API_KEY:
-        return cfg.ANTHROPIC_API_KEY
+    if cfg.OPENAI_API_KEY:
+        return cfg.OPENAI_API_KEY
 
     # Build a minimal tk root just for the prompt
     root = tk.Tk()
@@ -48,7 +48,7 @@ def get_api_key() -> str:
 
     tk.Label(
         root,
-        text="Enter your Anthropic API key to get started:",
+        text="Enter your OpenAI API key to get started:",
         bg=DARK["bg"],
         fg=DARK["text_secondary"],
         font=("SF Pro Text", 12),
@@ -113,7 +113,7 @@ def get_api_key() -> str:
     if result["save"]:
         cfg.save_api_key(result["key"])
 
-    cfg.ANTHROPIC_API_KEY = result["key"]
+    cfg.OPENAI_API_KEY = result["key"]
     return result["key"]
 
 

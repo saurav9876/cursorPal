@@ -3,9 +3,8 @@ import os
 import json
 from pathlib import Path
 
-# Model
-ANTHROPIC_MODEL = "claude-sonnet-4-6"
-COMPUTER_USE_BETA = "computer-use-2025-01-01"
+# Model — OpenAI GPT-4o with vision
+OPENAI_MODEL = "gpt-4o"
 
 # Window
 WINDOW_WIDTH = 420
@@ -41,12 +40,13 @@ BEHAVIOR:
 - If something doesn't work as expected, explain what happened and adapt
 - Be encouraging and patient
 
-You have access to a computer tool for taking screenshots and controlling the mouse/keyboard."""
+You have access to a `computer` tool for taking screenshots and controlling the mouse/keyboard.
+IMPORTANT: Always call the `computer` tool with action="screenshot" first before doing anything else."""
 
 
 def load_api_key() -> str | None:
     """Load API key from environment or config file."""
-    key = os.environ.get("ANTHROPIC_API_KEY")
+    key = os.environ.get("OPENAI_API_KEY")
     if key:
         return key
     if CONFIG_FILE.exists():
@@ -65,4 +65,4 @@ def save_api_key(key: str) -> None:
 
 
 # Load at import time
-ANTHROPIC_API_KEY = load_api_key()
+OPENAI_API_KEY = load_api_key()
